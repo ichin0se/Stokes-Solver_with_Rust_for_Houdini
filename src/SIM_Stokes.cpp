@@ -96,7 +96,7 @@ const SIM_DopDescription * SIM_Stokes::getDopDescription() {
                                             PRM_Template(PRM_STRING, 1, &theCollisionName, &theCollisionDefault),
                                             PRM_Template(PRM_STRING, 1, &theCollisionWeightsName),
                                             PRM_Template(PRM_STRING, 1, &theCollisionVelocityName),
-                                        //    PRM_Template(PRM_STRING, 1, &thePressureName, &thePressureDefault),
+                                            PRM_Template(PRM_STRING, 1, &thePressureName, &thePressureDefault),
                                             PRM_Template(PRM_STRING, 1, &theDensityName),
                                             PRM_Template(PRM_FLT, 1, &theMinDensityName, PRMoneDefaults, 0, 0, 0, &PRM_SpareData::unitsDensity),
                                             PRM_Template(PRM_FLT, 1, &theMaxDensityName, &theMaxDensityDefault, 0, 0, 0, &PRM_SpareData::unitsDensity),

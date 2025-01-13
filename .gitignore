@@ -8,3 +8,4 @@ backup/
 *.so
 *.dylib
 *.exr
+/target
