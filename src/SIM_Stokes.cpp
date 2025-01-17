@@ -272,7 +272,7 @@ bool SIM_Stokes::solveGasSubclass(SIM_Engine& engine, SIM_Object* obj, SIM_Time 
         &xy_liquid_weights,
         &xz_liquid_weights,
         &yz_liquid_weights,
-        NULL, NULL, NULL
+        0, 0, 0
     };
 
     SIM_RawField* cweights[7] = {
@@ -280,7 +280,7 @@ bool SIM_Stokes::solveGasSubclass(SIM_Engine& engine, SIM_Object* obj, SIM_Time 
         &xy_fluid_weights,
         &xz_fluid_weights,
         &yz_fluid_weights,
-        NULL, NULL, NULL
+        0, 0, 0
     };
 
     int ns = getNumSuperSamples();
@@ -294,16 +294,22 @@ bool SIM_Stokes::solveGasSubclass(SIM_Engine& engine, SIM_Object* obj, SIM_Time 
     bool is_col_const = false;
     if ( colfield->field()->isConstant(&cval) && cval < 0) {
         is_col_const = true;
-    }else{
+    }
+
+    { // Compute surfweights
         UT_PerfMonAutoSolveEvent event(this, "Compute Surface Weights");
 
         if ( surfweights ) {
+            std::cerr << " surfweights->getField(0) = " << surfweights->getField(0) << "\n"
+                      << " surfweights->getField(1) = " << surfweights->getField(1) << "\n"
+                      << " surfweights->getField(2) = " << surfweights->getField(2) << "\n";
             sweights[4] = const_cast<SIM_RawField*>(surfweights->getField(0));
             sweights[5] = const_cast<SIM_RawField*>(surfweights->getField(1));
             sweights[6] = const_cast<SIM_RawField*>(surfweights->getField(2));
             for ( int i = 4; i < 7; ++i ){
                 sweights[i]->setScaleDivideThreshold(1, NULL, NULL, MINWEIGHT);
             }
+            std::cerr << " surfweights not eq null" << std::endl;
         }else{
             simEstimateVolumeFractions(surffield, is_surf_const, SIM_SAMPLE_FACEX,  ns, false, u_liquid_weights);
             simEstimateVolumeFractions(surffield, is_surf_const, SIM_SAMPLE_FACEY,  ns, false, v_liquid_weights);
@@ -311,6 +317,7 @@ bool SIM_Stokes::solveGasSubclass(SIM_Engine& engine, SIM_Object* obj, SIM_Time 
             sweights[4] = &u_liquid_weights;
             sweights[5] = &v_liquid_weights;
             sweights[6] = &w_liquid_weights;
+            std::cerr << " surfweights eq null" << std::endl;
         }
 
         simEstimateVolumeFractions(surffield, is_surf_const, SIM_SAMPLE_CENTER, ns, false, c_liquid_weights);
@@ -319,34 +326,45 @@ bool SIM_Stokes::solveGasSubclass(SIM_Engine& engine, SIM_Object* obj, SIM_Time 
         simEstimateVolumeFractions(surffield, is_surf_const, SIM_SAMPLE_EDGEYZ, ns, false, yz_liquid_weights);
     }
 
-    UT_PerfMonAutoSolveEvent event(this, "Compute Collision Weights");
+    { // Compute colweights
+        UT_PerfMonAutoSolveEvent event(this, "Compute Collision Weights");
 
-    if ( colweights ) {
-        cweights[4] = const_cast<SIM_RawField*>(colweights->getField(0));
-        cweights[5] = const_cast<SIM_RawField*>(colweights->getField(1));
-        cweights[6] = const_cast<SIM_RawField*>(colweights->getField(2));
-        for ( int i = 4; i < 7; ++i ){
-            cweights[i]->setScaleDivideThreshold(1, NULL, NULL, MINWEIGHT);
+        if ( colweights ) {
+            std::cerr << " colweights->getField(0) = " << colweights->getField(0) << "\n"
+                      << " colweights->getField(1) = " << colweights->getField(1) << "\n"
+                      << " colweights->getField(2) = " << colweights->getField(2) << "\n";
+            cweights[4] = const_cast<SIM_RawField*>(colweights->getField(0));
+            cweights[5] = const_cast<SIM_RawField*>(colweights->getField(1));
+            cweights[6] = const_cast<SIM_RawField*>(colweights->getField(2));
+            for ( int i = 4; i < 7; ++i ){
+                cweights[i]->setScaleDivideThreshold(1, NULL, NULL, MINWEIGHT);
+            }
+            std::cerr << " colweights not eq null" << std::endl;
+        }else{
+            simEstimateVolumeFractions(colfield, is_col_const, SIM_SAMPLE_FACEX,  ns, false, u_fluid_weights);
+            simEstimateVolumeFractions(colfield, is_col_const, SIM_SAMPLE_FACEY,  ns, false, v_fluid_weights);
+            simEstimateVolumeFractions(colfield, is_col_const, SIM_SAMPLE_FACEZ,  ns, false, w_fluid_weights);
+            cweights[4] = &u_fluid_weights;
+            cweights[5] = &v_fluid_weights;
+            cweights[6] = &w_fluid_weights;
+            std::cerr << " colweights eq null" << std::endl;
         }
-    }else{
-        simEstimateVolumeFractions(colfield, is_col_const, SIM_SAMPLE_FACEX,  ns, false, u_fluid_weights);
-        simEstimateVolumeFractions(colfield, is_col_const, SIM_SAMPLE_FACEY,  ns, false, v_fluid_weights);
-        simEstimateVolumeFractions(colfield, is_col_const, SIM_SAMPLE_FACEZ,  ns, false, w_fluid_weights);
-        cweights[4] = &u_fluid_weights;
-        cweights[5] = &v_fluid_weights;
-        cweights[6] = &w_fluid_weights;
+
+        simEstimateVolumeFractions(colfield, is_col_const, SIM_SAMPLE_CENTER, ns, false, c_fluid_weights);
+        simEstimateVolumeFractions(colfield, is_col_const, SIM_SAMPLE_EDGEXY, ns, false, xy_fluid_weights);
+        simEstimateVolumeFractions(colfield, is_col_const, SIM_SAMPLE_EDGEXZ, ns, false, xz_fluid_weights);
+        simEstimateVolumeFractions(colfield, is_col_const, SIM_SAMPLE_EDGEYZ, ns, false, yz_fluid_weights);
     }
-
-    simEstimateVolumeFractions(colfield, is_col_const, SIM_SAMPLE_CENTER, ns, false, c_fluid_weights);
-    simEstimateVolumeFractions(colfield, is_col_const, SIM_SAMPLE_EDGEXY, ns, false, xy_fluid_weights);
-    simEstimateVolumeFractions(colfield, is_col_const, SIM_SAMPLE_EDGEXZ, ns, false, xz_fluid_weights);
-    simEstimateVolumeFractions(colfield, is_col_const, SIM_SAMPLE_EDGEYZ, ns, false, yz_fluid_weights);
-
 
     //#ifndef NDEBUG
         for (int i = 0; i < 7; ++i ) {
-            assert(sweights[i] && cweights[i]);
+            if (!(sweights[i] && cweights[i])) {
+
+                addError(obj,SIM_MESSAGE, "Did not match sweights value between cweights value.", UT_ERROR_ABORT);
+                return false;
+            }
         } // make sure we got all of them
+
     //#endif
     /// =================== End of Computing Volume Fraction Weights ===================
 

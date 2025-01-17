@@ -316,6 +316,15 @@ namespace Stokes{
             // SolveType flags since velocities don't get an actual index)
             SIM_RawIndexField myUIndex, myVIndex, myWIndex;
 
+            // building the system is involved, so we need a temporary datastructure to
+            // handle terms added in the same place.
+            struct RowEntry {
+                RowEntry(int col, T val) : col(col), val(val) { }
+                ~RowEntry() { }
+                bool operator<(const RowEntry& other) const { return col < other.col; } // column comparator
+                int col;
+                T val;
+            };
 
             // out of bounds checks
             bool c_oob(int i, int j, int k) const {
@@ -366,6 +375,55 @@ namespace Stokes{
                 return txy_oob(i,j,k) ? exint(INVALIDIDX) : myTxyIndex(i,j,k);
             }
 
+            void addUTerm(  int row_index, int i, int j, int k, float sign, float outer_liquid, float outer_fluid,
+                            const sim_buildSystemParms& parms,
+                            UT_VoxelProbeAverage<float,-1,0,0>& rhox,
+                            UT_Array<RowEntry>& rowentries,
+                            VectorType& b
+                            ) const;
+            void addVTerm(  int row_index, int i, int j, int k, float sign, float outer_liquid, float outer_fluid,
+                            const sim_buildSystemParms& parms,
+                            UT_VoxelProbeAverage<float,0,-1,0>& rhoy,
+                            UT_Array<RowEntry>& rowentries,
+                            VectorType& b
+                            ) const;
+            void addWTerm(  int row_index, int i, int j, int k, float sign, float outer_liquid, float outer_fluid,
+                            const sim_buildSystemParms& parms,
+                            UT_VoxelProbeAverage<float,0,0,-1>& rhoz,
+                            UT_Array<RowEntry>& rowentries,
+                            VectorType& b
+                            ) const;
+
+            // we need this function to combine entries with the same column index
+            void appendRowEntries(MatrixType& A, int row_index, UT_Array<RowEntry>& rowentries) const;
+
+            // pressure block:
+            exint p_blk_idx(int i, int j, int k) const { return p_idx(i,j,k); }
+
+            // stress tensor block:
+            exint txx_blk_idx(int i, int j, int k) const { return txx_idx(i,j,k) - myNumPressureVars; }
+            exint tyy_blk_idx(int i, int j, int k) const { return tyy_idx(i,j,k) - myNumPressureVars; }
+            exint tyz_blk_idx(int i, int j, int k) const { return tyz_idx(i,j,k) - myNumPressureVars; }
+            exint txz_blk_idx(int i, int j, int k) const { return txz_idx(i,j,k) - myNumPressureVars; }
+            exint txy_blk_idx(int i, int j, int k) const { return txy_idx(i,j,k) - myNumPressureVars; }
+
+            exint tzz_blk_idx(int i, int j, int k) const {
+                return c_oob(i,j,k) ? exint(INVALIDIDX) : myCentralIndex(i,j,k) + myNumStressVars - myNumPressureVars;
+            }
+
+            // velocity block: ( this is not in the final system, but used to build
+            // intermediate operators, like deformation rate operator, and gradient
+            // operator )
+            exint u_blk_idx(int i, int j, int k) const {
+                return u_oob(i,j,k) ? exint(INVALIDIDX) : myUIndex(i,j,k);
+            }
+            exint v_blk_idx(int i, int j, int k) const {
+                return v_oob(i,j,k) ? exint(INVALIDIDX) : myVIndex(i,j,k);
+            }
+            exint w_blk_idx(int i, int j, int k) const {
+                return w_oob(i,j,k) ? exint(INVALIDIDX) : myWIndex(i,j,k);
+            }
+
     }; // End of sim_stokesSolver Class
 
 } // End of namespace
@@ -409,6 +467,7 @@ template<typename T> SolverResult sim_stokesSolver<T>::solve(   const SIM_RawFie
                                                                 SIM_VectorField & vel
                                                                 ) const {
     SolverResult result = NOCHANGE;
+    std::cerr << " Solve! " << std::endl;
     result = solveStokes(sweights, cweights, viscosity, density, colvel, surfpres, valid, vel);
     return result;
 }
@@ -424,6 +483,7 @@ template<typename T> SolverResult sim_stokesSolver<T>::solveStokes( const SIM_Ra
                                                                     SIM_VectorField * valid,
                                                                     SIM_VectorField & vel
                                                                     ) const {
+    std::cerr << " Solve Stokes! " << std::endl;
     sim_buildSystemParms parms{ *sweights[0]->field(),
                                 *sweights[1]->field(),
                                 *sweights[2]->field(),
@@ -497,10 +557,20 @@ template<typename T> void sim_stokesSolver<T>::buildSystem( MatrixType &A,
                                                             const sim_buildSystemParms& parms
                                                             ) const {
     UT_PerfMonAutoSolveEvent event(&mySolver, "Build System");
+    std::cerr << " Build System! " << std::endl;
+    std::cerr << " Initialize b by the Zero " << std::endl;
     b.zero();
+
+    std::cerr << " Add Center Terms " << std::endl;
     addCenterTerms(A,b,parms);
+
+    std::cerr << " Add Txy Terms " << std::endl;
     addTxyTerms(A,b,parms);
+
+    std::cerr << " Add Txz Terms " << std::endl;
     addTxzTerms(A,b,parms);
+
+    std::cerr << " Add Tyz Terms " << std::endl;
     addTyzTerms(A,b,parms);
     //A.sortRows(); // not necessary since we do this manually?
 }
@@ -513,15 +583,18 @@ template<typename T> SolverResult sim_stokesSolver<T>::solveSystem( const Matrix
                                                                     VectorType &x,
                                                                     bool use_opencl
                                                                     ) const {
+    std::cerr << " Solve System! " << std::endl;
     b.testForNan();
     auto system_size = b.length();
-    assert( b.length() == A.getNumRows() );
+    if(!(b.length() == A.getNumRows())) {
+        return FAILED;
+    }
     if ( !system_size ) {
         return NOCHANGE;
     }
 
     UT_PerfMonAutoSolveEvent event(&mySolver, "Solve Stokes Linear System");
-
+    std::cerr << " Solve Stokes Linear System! " << std::endl;
     T tol = mySolver.getTolerance();
 
     int iterations = 0; // report these later
@@ -573,6 +646,7 @@ template<typename T> void sim_stokesSolver<T>::updateVelocitiesPartial( const Ve
                                                                         int axis,
                                                                         const UT_JobInfo &info
                                                                         ) const {
+    std::cerr << " Update Velocities! " << std::endl;
     // Update velocities based on the pressures and stresses determined by the solver.
     UT_VoxelArrayF &u = *vel.getField(axis)->fieldNC();
 
@@ -621,6 +695,7 @@ template<typename T> void sim_stokesSolver<T>::updateVelocitiesPartial( const Ve
             }
         }
     } else if ( axis == 1 ) {
+        std::cerr << " Sampling Axis is 1! " << std::endl;
         UT_VoxelProbeAverage<float,0,-1,0> rhoy;
         rhoy.setArray(&parms.density);
         UT_VoxelArrayIteratorF vit(&u);
@@ -654,6 +729,7 @@ template<typename T> void sim_stokesSolver<T>::updateVelocitiesPartial( const Ve
             }
         }
     } else if ( axis == 2 ) {
+        std::cerr << " Sampling Axis is 2! " << std::endl;
         UT_VoxelProbeAverage<float,0,0,-1> rhoz;
         rhoz.setArray(&parms.density);
         UT_VoxelArrayIteratorF vit(&u);
@@ -690,6 +766,7 @@ template<typename T> void sim_stokesSolver<T>::updateVelocitiesPartial( const Ve
             }
         }
     } else{
+        std::cerr << " Sampling Axis is Unknown Dimension(3)! " << std::endl;
         assert(0); // uknown dimension
     }
 }
@@ -742,7 +819,8 @@ template<typename T> template<int AXIS> auto sim_stokesSolver<T>::ghostFluidSurf
 /// =================== Implement sim_stokesSolver::classifyAndBuildIndices() ===================
 template<typename T> void sim_stokesSolver<T>::classifyAndBuildIndices( const SIM_RawField * const* surf_weights,
                                                                         const SIM_RawField * const* col_weights
-                                                                        ){
+                                                                        ) {
+    std::cerr << " Classify and Build Indices! " << std::endl;
     initAndClassifyIndex(surf_weights, col_weights, myUIndex, FACEX);
     initAndClassifyIndex(surf_weights, col_weights, myVIndex, FACEY);
     initAndClassifyIndex(surf_weights, col_weights, myWIndex, FACEZ);
@@ -773,10 +851,14 @@ template<typename T> void sim_stokesSolver<T>::initAndClassifyIndex(const SIM_Ra
                                                                     SIM_RawIndexField &index,
                                                                     FieldIndex fidx
                                                                     ) {
+    std::cerr << " Init and Classify Index! " << std::endl;
+    std::cerr << "surf_weights[" << fidx << "] = " << surf_weights[fidx] << std::endl;
+    std::cerr << "fidx = " << fidx << std::endl;
     index.match(*surf_weights[fidx]);
     index.makeConstant(INVALIDIDX);
     index.setBorder(UT_VOXELBORDER_CONSTANT, INVALIDIDX);
 
+    std::cerr << " Call classifyIndexField! " << std::endl;
     classifyIndexField(surf_weights, col_weights, index, fidx);
 }
 
@@ -786,6 +868,7 @@ template<typename T> void sim_stokesSolver<T>::buildIndex(  SIM_RawIndexField &i
                                                             FieldIndex fidx,
                                                             exint &maxindex
                                                             ){
+    std::cerr << " Build Index! " << std::endl;
     UT_VoxelArrayIteratorI vit(index.fieldNC());
     UT_VoxelTileIteratorI vitt;
     for (vit.rewind(); !vit.atEnd(); vit.advanceTile()) {
@@ -809,6 +892,7 @@ template<typename T> void sim_stokesSolver<T>::buildIndex(  SIM_RawIndexField &i
 template<typename T> void sim_stokesSolver<T>::buildVelocityIndices(const SIM_RawField * const* surf_weights,
                                                                     const SIM_RawField * const* col_weights
                                                                     ){
+    std::cerr << " Build Velocity Indices! " << std::endl;
     // Velocity indices start from 0 as they are local to their block because they
     // are only used in the blockwise system builder
     exint maxindex = 0;
@@ -833,6 +917,7 @@ template<typename T> void sim_stokesSolver<T>::classifyIndexFieldPartial(   cons
                                                                             FieldIndex fidx,
                                                                             const UT_JobInfo &info
                                                                             ){
+    std::cerr << " Classify Index Field Partial! " << std::endl;
     UT_VoxelArrayIteratorI vit(index.fieldNC());
     vit.setCompressOnExit(true);
     vit.splitByTile(info);
@@ -853,6 +938,7 @@ template<typename T> void sim_stokesSolver<T>::buildCollisionIndex( SIM_RawIndex
                                                                     FieldIndex fidx,
                                                                     exint &maxindex
                                                                     ){
+    std::cerr << " Build Collision Index! " << std::endl;
     UT_VoxelArrayIteratorI vit(index.fieldNC());
     UT_VoxelTileIteratorI vitt;
     for (vit.rewind(); !vit.atEnd(); vit.advanceTile()) {
@@ -875,6 +961,7 @@ template<typename T> SolveType sim_stokesSolver<T>::solveType(  const SIM_RawFie
                                                                 int i, int j, int k,
                                                                 FieldIndex fidx
                                                                 ) const{
+    //std::cerr << " Solve Type! " << std::endl;
     //const UT_VoxelArrayF &c_vol_liquid = *surf_weights[0]->field();
     const UT_VoxelArrayF &ez_vol_liquid = *surf_weights[1]->field();
     const UT_VoxelArrayF &ey_vol_liquid = *surf_weights[2]->field();
@@ -1037,6 +1124,452 @@ template<typename T> SolveType sim_stokesSolver<T>::solveType(  const SIM_RawFie
         return insystem ? SOLVED : INVALIDIDX; // needed for moving boundaries (gets an index in blockwise code)
     }
 }
+
+
+/// =================== Implement sim_stokesSolver::addCenterTermsPartial() ===================
+// Chain `solve() -> solveStokes() -> buildSystem() -> addCenterTerms() -> addCenterTermsPartial()`
+template<typename T> void sim_stokesSolver<T>::addCenterTermsPartial(   MatrixType &A,
+                                                                        VectorType &b,
+                                                                        const sim_buildSystemParms& parms,
+                                                                        const UT_JobInfo& info
+                                                                        ) const {
+    // Setup density probes
+    UT_VoxelProbeAverage<float,-1,0,0> rho_x;
+    UT_VoxelProbeAverage<float,0,-1,0> rho_y;
+    UT_VoxelProbeAverage<float,0,0,-1> rho_z;
+    rho_x.setArray(&parms.density);
+    rho_y.setArray(&parms.density);
+    rho_z.setArray(&parms.density);
+
+    auto min_visc = mySolver.getMinViscosity();
+
+    //rhs << Bp*uold - dx*WLp*(G.transpose()*WFu - WFp*G.transpose())*ubc + WLp*G.transpose()*WFu*ust,
+    //       Bt*uold - dx*WLt*(D*WFu - WFt*D)*ubc + WLt*D*WFu*ust;
+    //
+    UT_Array<RowEntry> rowentries;
+    UT_VoxelArrayIteratorI vit;
+    UT_VoxelTileIteratorI vitt;
+    vit.setConstArray(myCentralIndex.field());
+    vit.splitByTile(info);
+    for ( vit.rewind(); !vit.atEnd(); vit.advanceTile() ) {
+        if ( vit.isTileConstant() && !isInSystem(vit.getValue()) ) {
+            continue;
+        }
+
+        vitt.setTile(vit);
+
+        for ( vitt.rewind(); !vitt.atEnd(); vitt.advance() ) {
+            if (!isInSystem(vitt.getValue())) {
+                continue;
+            }
+            int i = vitt.x(), j = vitt.y(), k = vitt.z();
+
+            auto cfw = parms.c_vol_fluid(i,j,k); // central fluid volume weight
+            auto clw = parms.c_vol_liquid(i,j,k); // central liquid volume weight
+
+            // du/dx + dv/dy + dw/dz = 0
+            int row_index = p_idx(i,j,k);
+            rowentries.clear(); // reset entries per row
+
+            b(row_index) = 0;
+
+            addUTerm(row_index, i+1, j, k, +1, clw, cfw, parms, rho_x, rowentries, b);
+            addUTerm(row_index, i,   j, k, -1, clw, cfw, parms, rho_x, rowentries, b);
+
+            addVTerm(row_index, i, j+1, k, +1, clw, cfw, parms, rho_y, rowentries, b);
+            addVTerm(row_index, i, j,   k, -1, clw, cfw, parms, rho_y, rowentries, b);
+
+            addWTerm(row_index, i, j, k+1, +1, clw, cfw, parms, rho_z, rowentries, b);
+            addWTerm(row_index, i, j, k,   -1, clw, cfw, parms, rho_z, rowentries, b);
+
+            appendRowEntries(A, row_index, rowentries);
+
+            // txx + 0.5*tyy - du/dx + dw/dz = 0
+            row_index = txx_idx(i,j,k);
+            rowentries.clear();
+
+            auto visc = parms.viscosity(i,j,k);
+            auto factor = visc < min_visc ? 0 : dx*dx/visc;
+            auto diag = clw * cfw * factor;
+
+            rowentries.emplace_back(row_index, diag);
+            rowentries.emplace_back(tyy_idx(i,j,k), 0.5f*diag);
+            b(row_index) = 0;
+
+            addUTerm(row_index, i+1,j, k,  -1, clw, cfw, parms, rho_x, rowentries, b);
+            addUTerm(row_index, i,  j, k,  +1, clw, cfw, parms, rho_x, rowentries, b);
+
+            addWTerm(row_index, i, j, k+1, +1, clw, cfw, parms, rho_z, rowentries, b);
+            addWTerm(row_index, i, j, k,   -1, clw, cfw, parms, rho_z, rowentries, b);
+
+            appendRowEntries(A, row_index, rowentries);
+
+            // tyy + 0.5*txx - dv/dy + dw/dz = 0
+            row_index = tyy_idx(i,j,k);
+            rowentries.clear();
+
+            rowentries.emplace_back(row_index, diag);
+            rowentries.emplace_back(txx_idx(i,j,k), 0.5*diag);
+            b(row_index) = 0;
+
+            addVTerm(row_index, i, j+1, k, -1, clw, cfw, parms, rho_y, rowentries, b);
+            addVTerm(row_index, i, j,   k, +1, clw, cfw, parms, rho_y, rowentries, b);
+
+            addWTerm(row_index, i, j, k+1, +1, clw, cfw, parms, rho_z, rowentries, b);
+            addWTerm(row_index, i, j, k,   -1, clw, cfw, parms, rho_z, rowentries, b);
+
+            appendRowEntries(A, row_index, rowentries);
+        }
+    }
+}
+
+
+/// =================== Implement sim_stokesSolver::addTxyTermsPartial() ===================
+// Chain `solve() -> solveStokes() -> buildSystem() -> addTxyTerms() -> addTxyTermsPartial()`
+template<typename T> void sim_stokesSolver<T>::addTxyTermsPartial(  MatrixType &A,
+                                                                    VectorType &b,
+                                                                    const sim_buildSystemParms& parms,
+                                                                    const UT_JobInfo& info) const {
+    UT_VoxelProbeAverage<float, -1, -1, 0> visc_xy;
+    visc_xy.setArray(&parms.viscosity);
+
+    auto min_visc = mySolver.getMinViscosity();
+
+    UT_VoxelProbeAverage<float,-1,0,0> rho_x;
+    UT_VoxelProbeAverage<float,0,-1,0> rho_y;
+    rho_x.setArray(&parms.density);
+    rho_y.setArray(&parms.density);
+
+    UT_Array<RowEntry> rowentries;
+    //txy - du/dy - dv/dx = 0
+    UT_VoxelArrayIteratorI vit;
+    UT_VoxelTileIteratorI vitt;
+    vit.setConstArray(myTxyIndex.field());
+    vit.splitByTile(info);
+    for ( vit.rewind(); !vit.atEnd(); vit.advanceTile() ) {
+        if ( vit.isTileConstant() && !isInSystem(vit.getValue()) ) {
+            continue;
+        }
+
+        vitt.setTile(vit);
+
+        for ( vitt.rewind(); !vitt.atEnd(); vitt.advance() ) {
+            if (!isInSystem(vitt.getValue())) {
+                continue;
+            }
+
+            int i = vitt.x(), j = vitt.y(), k = vitt.z();
+            int row_index = txy_idx(i,j,k);
+            rowentries.clear();
+
+            visc_xy.setIndex(vitt);
+            auto visc = visc_xy.getValue();
+            auto factor = visc < min_visc ? 0.0 : dx*dx/visc;
+            auto lw = parms.ez_vol_liquid(i,j,k);
+            auto fw = parms.ez_vol_fluid(i,j,k);
+            rowentries.emplace_back(row_index, lw * fw * factor);
+            b(row_index) = 0;
+
+            addUTerm(row_index, i, j,   k, -1, lw, fw, parms, rho_x, rowentries, b);
+            addUTerm(row_index, i, j-1, k, +1, lw, fw, parms, rho_x, rowentries, b);
+
+            addVTerm(row_index, i,   j, k, -1, lw, fw, parms, rho_y, rowentries, b);
+            addVTerm(row_index, i-1, j, k, +1, lw, fw, parms, rho_y, rowentries, b);
+
+            appendRowEntries(A, row_index, rowentries);
+        }
+    }
+}
+
+
+/// =================== Implement sim_stokesSolver::addTxzTermsPartial() ===================
+// Chain `solve() -> solveStokes() -> buildSystem() -> addTxzTerms() -> addTxzTermsPartial()`
+template<typename T> void sim_stokesSolver<T>::addTxzTermsPartial(  MatrixType &A,
+                                                                    VectorType &b,
+                                                                    const sim_buildSystemParms& parms,
+                                                                    const UT_JobInfo& info
+                                                                    ) const {
+    UT_VoxelProbeAverage<float, -1, 0, -1> visc_xz;
+    visc_xz.setArray(&parms.viscosity);
+
+    auto min_visc = mySolver.getMinViscosity();
+
+    UT_VoxelProbeAverage<float,-1,0,0> rho_x;
+    UT_VoxelProbeAverage<float,0,0,-1> rho_z;
+    rho_x.setArray(&parms.density);
+    rho_z.setArray(&parms.density);
+
+    UT_Array<RowEntry> rowentries;
+    //txz - du/dz - dw/dx = 0
+    UT_VoxelArrayIteratorI vit;
+    UT_VoxelTileIteratorI vitt;
+    vit.setConstArray(myTxzIndex.field());
+    vit.splitByTile(info);
+    for ( vit.rewind(); !vit.atEnd(); vit.advanceTile() ) {
+        if ( vit.isTileConstant() && !isInSystem(vit.getValue()) ) {
+            continue;
+        }
+
+
+        vitt.setTile(vit);
+        for ( vitt.rewind(); !vitt.atEnd(); vitt.advance() ) {
+            if (!isInSystem(vitt.getValue())) {
+                continue;
+            }
+
+            int i = vitt.x(), j = vitt.y(), k = vitt.z();
+            int row_index = txz_idx(i,j,k);
+            rowentries.clear();
+
+            visc_xz.setIndex(vitt);
+            auto visc = visc_xz.getValue();
+            auto factor = visc < min_visc ? 0.0 : dx*dx/visc;
+            auto lw = parms.ey_vol_liquid(i,j,k);
+            auto fw = parms.ey_vol_fluid(i,j,k);
+            rowentries.emplace_back(row_index, lw * fw * factor);
+            b(row_index) = 0;
+
+            addUTerm(row_index, i, j, k,   -1, lw, fw, parms, rho_x, rowentries, b);
+            addUTerm(row_index, i, j, k-1, +1, lw, fw, parms, rho_x, rowentries, b);
+
+            addWTerm(row_index, i,   j, k, -1, lw, fw, parms, rho_z, rowentries, b);
+            addWTerm(row_index, i-1, j, k, +1, lw, fw, parms, rho_z, rowentries, b);
+
+            appendRowEntries(A, row_index, rowentries);
+        }
+    }
+}
+
+
+/// =================== Implement sim_stokesSolver::addTyzTermsPartial() ===================
+// Chain `solve() -> solveStokes() -> buildSystem() -> addTyzTerms() -> addTyzTermsPartial()`
+template<typename T> void sim_stokesSolver<T>::addTyzTermsPartial(  MatrixType &A,
+                                                                    VectorType &b,
+                                                                    const sim_buildSystemParms& parms,
+                                                                    const UT_JobInfo& info
+                                                                    ) const {
+    UT_VoxelProbeAverage<float, 0, -1, -1> visc_yz;
+    visc_yz.setArray(&parms.viscosity);
+
+    auto min_visc = mySolver.getMinViscosity();
+
+    UT_VoxelProbeAverage<float,0,-1,0> rho_y;
+    UT_VoxelProbeAverage<float,0,0,-1> rho_z;
+    rho_y.setArray(&parms.density);
+    rho_z.setArray(&parms.density);
+
+    UT_Array<RowEntry> rowentries;
+    //tyz = dv/dz + dw/dy
+    UT_VoxelArrayIteratorI vit;
+    UT_VoxelTileIteratorI vitt;
+    vit.setConstArray(myTyzIndex.field());
+    vit.splitByTile(info);
+    for ( vit.rewind(); !vit.atEnd(); vit.advanceTile() ) {
+        if ( vit.isTileConstant() && !isInSystem(vit.getValue()) ) {
+            continue;
+        }
+
+        vitt.setTile(vit);
+        for ( vitt.rewind(); !vitt.atEnd(); vitt.advance() ) {
+            if (!isInSystem(vitt.getValue())) {
+                continue;
+            }
+
+            int i = vitt.x(), j = vitt.y(), k = vitt.z();
+            int row_index = tyz_idx(i,j,k);
+            rowentries.clear();
+
+            visc_yz.setIndex(vitt);
+            auto visc = visc_yz.getValue();
+            auto factor = visc < min_visc ? 0.0 : dx*dx/visc;
+            auto lw = parms.ex_vol_liquid(i,j,k);
+            auto fw = parms.ex_vol_fluid(i,j,k);
+            rowentries.emplace_back(row_index, lw * fw * factor);
+            b(row_index) = 0;
+
+            addVTerm(row_index, i, j,   k,   -1, lw, fw, parms, rho_y, rowentries, b);
+            addVTerm(row_index, i, j,   k-1, +1, lw, fw, parms, rho_y, rowentries, b);
+
+            addWTerm(row_index, i, j,   k,   -1, lw, fw, parms, rho_z, rowentries, b);
+            addWTerm(row_index, i, j-1, k,   +1, lw, fw, parms, rho_z, rowentries, b);
+
+            appendRowEntries(A, row_index, rowentries);
+        }
+    }
+}
+
+
+/// =================== Implement sim_stokesSolver::addUTerm() ===================
+// Chain `solve() -> solveStokes() -> buildSystem() -> addCenterTerms() -> addCenterTermsPartial() -> addUTerm()`
+template<typename T> void sim_stokesSolver<T>::addUTerm(int row_index, int i, int j, int k, float sign, float outer_liquid, float outer_fluid,
+                                                        const sim_buildSystemParms& parms,
+                                                        UT_VoxelProbeAverage<float,-1,0,0>& rhox,
+                                                        UT_Array<RowEntry>& rowentries,
+                                                        VectorType& b
+                                                        ) const {
+    auto solid_vel = parms.u_solid.getValue(i,j,k);
+    auto vel_fw = parms.u_vol_fluid(i,j,k); // x-face fluid volume weight
+    auto vel_lw = parms.u_vol_liquid(i,j,k); // x-face liquid volume weight
+
+    int idx = myUIndex(i,j,k);
+    if (isCollision(idx)){
+        b(row_index) -= sign * outer_liquid * vel_fw * solid_vel * dx;
+    } else if (isInSystem(idx)) {
+        rhox.setIndex(i,j,k);
+        auto rho = SYSclamp(rhox.getValue(), parms.minrho, parms.maxrho);
+        double factor = sign * dt * outer_liquid * vel_fw / (rho * vel_lw);
+
+        // clang-format off
+        //-dp/dx
+        if(isInSystem(p_idx(i,   j,   k)))     rowentries.emplace_back(p_idx(i,  j,  k),   -factor * parms.c_vol_liquid(i,  j,  k));
+        if(isInSystem(p_idx(i-1, j,   k)))     rowentries.emplace_back(p_idx(i-1,j,  k),   +factor * parms.c_vol_liquid(i-1,j,  k));
+
+        //dtxx/dx
+        if(isInSystem(txx_idx(i,  j,  k)))   rowentries.emplace_back(txx_idx(i,  j,  k),   +factor * parms.c_vol_liquid(i,  j,  k));
+        if(isInSystem(txx_idx(i-1,j,  k)))   rowentries.emplace_back(txx_idx(i-1,j,  k),   -factor * parms.c_vol_liquid(i-1,j,  k));
+
+        //dtxy/dy
+        if(isInSystem(txy_idx(i,  j+1,k)))   rowentries.emplace_back(txy_idx(i,  j+1,k),   +factor * parms.ez_vol_liquid(i, j+1,k));
+        if(isInSystem(txy_idx(i,  j,  k)))   rowentries.emplace_back(txy_idx(i,  j,  k),   -factor * parms.ez_vol_liquid(i, j,  k));
+
+        //dtxz/dz
+        if(isInSystem(txz_idx(i,  j,  k+1))) rowentries.emplace_back(txz_idx(i,  j,  k+1), +factor * parms.ey_vol_liquid(i, j,  k+1));
+        if(isInSystem(txz_idx(i,  j,  k)))   rowentries.emplace_back(txz_idx(i,  j,  k),   -factor * parms.ey_vol_liquid(i, j,  k));
+        // clang-format on
+
+        //u*
+        b(row_index) -= sign * outer_liquid * vel_fw * parms.u(i,j,k) * dx;
+
+        auto gfp = ghostFluidSurfaceTensionPressure<0>(i,j,k, vel_lw, parms.surfpres);
+        b(row_index) += factor * gfp;
+    }
+
+    b(row_index) += sign * outer_liquid * vel_fw      * solid_vel * dx;
+    b(row_index) -= sign * outer_liquid * outer_fluid * solid_vel * dx;
+}
+
+
+/// =================== Implement sim_stokesSolver::addVTerm() ===================
+// Chain `solve() -> solveStokes() -> buildSystem() -> addCenterTerms() -> addCenterTermsPartial() -> addVTerm()`
+template<typename T> void sim_stokesSolver<T>::addVTerm(int row_index, int i, int j, int k, float sign, float outer_liquid, float outer_fluid,
+                                                        const sim_buildSystemParms& parms,
+                                                        UT_VoxelProbeAverage<float,0,-1,0>& rhoy,
+                                                        UT_Array<RowEntry>& rowentries,
+                                                        VectorType& b
+                                                        ) const {
+    auto solid_vel = parms.v_solid.getValue(i,j,k);
+    auto vel_fw = parms.v_vol_fluid(i,j,k); // y-face fluid volume weight
+    auto vel_lw = parms.v_vol_liquid(i,j,k); // y-face liquid volume weight
+
+    int idx = myVIndex(i,j,k);
+    if (isCollision(idx)) {
+        b(row_index) -=  sign * outer_liquid * vel_fw * solid_vel * dx;
+    } else if (isInSystem(idx)) {
+        rhoy.setIndex(i,j,k);
+        auto rho = SYSclamp(rhoy.getValue(), parms.minrho, parms.maxrho);
+        double factor = sign * dt * outer_liquid * vel_fw / (rho * vel_lw);
+
+        // clang-format off
+        //-dp/dy
+        if(isInSystem(p_idx(i,   j,   k)))   rowentries.emplace_back(  p_idx(i,  j,  k),   -factor * parms.c_vol_liquid(i,   j,  k));
+        if(isInSystem(p_idx(i,   j-1, k)))   rowentries.emplace_back(  p_idx(i,  j-1,k),   +factor * parms.c_vol_liquid(i,   j-1,k));
+
+        //dtxy/dx
+        if(isInSystem(txy_idx(i+1,j,  k)))   rowentries.emplace_back(txy_idx(i+1,j,  k),   +factor * parms.ez_vol_liquid(i+1,j,  k));
+        if(isInSystem(txy_idx(i,  j,  k)))   rowentries.emplace_back(txy_idx(i,  j,  k),   -factor * parms.ez_vol_liquid(i,  j,  k));
+
+        //dtyy/dy
+        if(isInSystem(tyy_idx(i,  j,  k)))   rowentries.emplace_back(tyy_idx(i,  j,  k),   +factor * parms.c_vol_liquid(i,   j,  k));
+        if(isInSystem(tyy_idx(i,  j-1,k)))   rowentries.emplace_back(tyy_idx(i,  j-1,k),   -factor * parms.c_vol_liquid(i,   j-1,k));
+
+        //dtyz/dz
+        if(isInSystem(tyz_idx(i,  j,  k+1))) rowentries.emplace_back(tyz_idx(i,  j,  k+1), +factor * parms.ex_vol_liquid(i,   j, k+1));
+        if(isInSystem(tyz_idx(i,  j,  k)))   rowentries.emplace_back(tyz_idx(i,  j,  k),   -factor * parms.ex_vol_liquid(i,   j, k));
+        // clang-format on
+
+        b(row_index) -= sign * outer_liquid * vel_fw * parms.v(i,j,k) * dx;
+
+        auto gfp = ghostFluidSurfaceTensionPressure<1>(i,j,k, vel_lw, parms.surfpres);
+        b(row_index) += factor * gfp;
+    }
+
+    b(row_index) += sign * outer_liquid * vel_fw      * solid_vel * dx;
+    b(row_index) -= sign * outer_liquid * outer_fluid * solid_vel * dx;
+}
+
+
+/// =================== Implement sim_stokesSolver::addWTerm() ===================
+// Chain `solve() -> solveStokes() -> buildSystem() -> addCenterTerms() -> addCenterTermsPartial() -> addWTerm()`
+template<typename T> void sim_stokesSolver<T>::addWTerm(int row_index, int i, int j, int k, float sign, float outer_liquid, float outer_fluid,
+                                                        const sim_buildSystemParms& parms,
+                                                        UT_VoxelProbeAverage<float,0,0,-1>& rhoz,
+                                                        UT_Array<RowEntry>& rowentries,
+                                                        VectorType& b
+                                                        ) const {
+    auto solid_vel = parms.w_solid.getValue(i,j,k);
+    auto vel_fw = parms.w_vol_fluid(i,j,k); // y-face fluid volume weight
+    auto vel_lw = parms.w_vol_liquid(i,j,k); // y-face liquid volume weight
+
+    int idx = myWIndex(i,j,k);
+    if (isCollision(idx)) {
+        b(row_index) -= sign * outer_liquid * vel_fw * solid_vel * dx;
+    } else if (isInSystem(idx)) {
+        rhoz.setIndex(i,j,k);
+        auto rho = SYSclamp(rhoz.getValue(), parms.minrho, parms.maxrho);
+        double factor = sign * dt * outer_liquid * vel_fw / (rho * vel_lw);
+
+        // clang-format off
+        //-dpdz
+        if(isInSystem(p_idx(i,   j,   k)))   rowentries.emplace_back(  p_idx(i,  j,  k),   -factor * parms.c_vol_liquid(i,   j,  k));
+        if(isInSystem(p_idx(i,   j,   k-1))) rowentries.emplace_back(  p_idx(i,  j,  k-1), +factor * parms.c_vol_liquid(i,   j,  k-1));
+
+        //dtxz/dx
+        if(isInSystem(txz_idx(i+1,j,  k)))   rowentries.emplace_back(txz_idx(i+1,j,  k),   +factor * parms.ey_vol_liquid(i+1,j,  k));
+        if(isInSystem(txz_idx(i,  j,  k)))   rowentries.emplace_back(txz_idx(i,  j,  k),   -factor * parms.ey_vol_liquid(i,  j,  k));
+
+        //dtyz/dy
+        if(isInSystem(tyz_idx(i,  j+1,k)))   rowentries.emplace_back(tyz_idx(i,  j+1,k),   +factor * parms.ex_vol_liquid(i,  j+1,k));
+        if(isInSystem(tyz_idx(i,  j,  k)))   rowentries.emplace_back(tyz_idx(i,  j,  k),   -factor * parms.ex_vol_liquid(i,  j,  k));
+
+        //dtzz/dz -> -dtxx/dz - dtyy/dz
+        if(isInSystem(txx_idx(i,  j,  k)))   rowentries.emplace_back(txx_idx(i,  j,  k),   -factor * parms.c_vol_liquid(i,   j,  k));
+        if(isInSystem(txx_idx(i,  j,  k-1))) rowentries.emplace_back(txx_idx(i,  j,  k-1), +factor * parms.c_vol_liquid(i,   j,  k-1));
+
+        if(isInSystem(tyy_idx(i,  j,  k)))   rowentries.emplace_back(tyy_idx(i,  j,  k),   -factor * parms.c_vol_liquid(i,   j,  k));
+        if(isInSystem(tyy_idx(i,  j,  k-1))) rowentries.emplace_back(tyy_idx(i,  j,  k-1), +factor * parms.c_vol_liquid(i,   j,  k-1));
+        // clang-format on
+
+        b(row_index) -= sign * outer_liquid * vel_fw * parms.w(i,j,k) * dx;
+
+        auto gfp = ghostFluidSurfaceTensionPressure<2>(i,j,k, vel_lw, parms.surfpres);
+        b(row_index) += factor * gfp;
+    }
+
+    b(row_index) += sign * outer_liquid * vel_fw      * solid_vel * dx;
+    b(row_index) -= sign * outer_liquid * outer_fluid * solid_vel * dx;
+}
+
+
+/// =================== Implement sim_stokesSolver::appendRowEntries() ===================
+// Chain `solve() -> solveStokes() -> buildSystem() -> addTxzTerms() -> addTxzTermsPartial() -> appendRowEntries()`
+// we need this function to add entries with the same column index
+template<typename T> void sim_stokesSolver<T>::appendRowEntries(MatrixType& A, int row_index, UT_Array<RowEntry>& rowentries) const {
+    rowentries.sort(std::less<RowEntry>());
+    auto it = rowentries.begin();
+    if ( it == rowentries.end() ) return; // empty
+    auto prev = it;
+    int nz = 0;
+    for ( ++it; it != rowentries.end(); ++it ) {
+        if ( it->col != prev->col ) {
+            A.appendRowElement(row_index, prev->col, prev->val, nz);
+            prev = it;
+        } else {
+            prev->val += it->val;
+        }
+    }
+    A.appendRowElement(row_index, prev->col, prev->val, nz); // handle the last element
+}
+
 
 
 // minimum allowed surface weight
