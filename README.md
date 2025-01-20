@@ -10,7 +10,7 @@
 
 ## Table of Contents
 
-1. [Stokes Solver with Rust for Houdini](#Stokes Solver with Rust for Houdini)
+1. [Stokes Solver with Rust for Houdini](#Stokes-Solver-with-Rust-for-Houdini)
 2. [Enviroments](#Enviroments)
 3. [Directory Structure](#DirectoryStructure)
 4. [Installation](#Installation)
@@ -34,7 +34,19 @@ Implementation by rust of the Stokes variational micro solver plug-in DOP for Ho
 
 ## DirectoryStructure
 ```
-.\
+.
+├── Cargo.toml
+├── LICENSE
+├── README.md
+└── src
+    ├── interface.cpp
+    ├── lib.rs
+    ├── SIM_Stokes.cpp
+    ├── SIM_Stokes.hpp
+    ├── SIM_Stokes.o
+    ├── SolverCore.cpp
+    └── util
+        └── eigen.h
 
 ```
 
