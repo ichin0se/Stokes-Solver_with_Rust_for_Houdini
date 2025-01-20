@@ -1,4 +1,6 @@
 #include "SIM_Stokes.hpp"
+#include "interface.cpp"
+#include "UT/UT_Interrupt.h"
 #include "UT/UT_SparseMatrix.h"
 #include "util/eigen.h"
 #include <UT/UT_DSOVersion.h>
@@ -45,10 +47,10 @@ namespace Stokes{
 
 
     template<typename T> class sim_stokesSolver {
-        using MatrixType = UT_SparseMatrixELLT<T, /*colmajor*/true>;
-        using VectorType = UT_VectorT<T>;
-        using BlockMatrixType = Eigen::SparseMatrix<T>;
-        using BlockVectorType = VecX<T>;
+        using MatrixType = UT_SparseMatrixELLT<fpreal32, /*colmajor*/true>;
+        using VectorType = UT_VectorT<fpreal32>;
+        using BlockMatrixType = Eigen::SparseMatrix<fpreal32>;
+        using BlockVectorType = VecX<fpreal32>;
 
         public:
 
@@ -300,8 +302,8 @@ namespace Stokes{
                                     ) const;
 
 
-        private:
-            // date member
+
+        // date member
             int                 ni, nj, nk;
             float               dx, dt;
             int                 myNumPressureVars;
@@ -648,52 +650,70 @@ template<typename T> void sim_stokesSolver<T>::updateVelocitiesPartial( const Ve
                                                                         ) const {
     std::cerr << " Update Velocities! " << std::endl;
     // Update velocities based on the pressures and stresses determined by the solver.
-    UT_VoxelArrayF &u = *vel.getField(axis)->fieldNC();
+    UT_VoxelArrayF& u = *vel.getField(axis)->fieldNC();
+    UT_Interrupt* boss = UTgetInterrupt();
 
     // edge-centred quantities
-    auto txy = [&](int i, int j, int k) { return !isInSystem(txy_idx(i,j,k)) ? 0 : x(txy_idx(i,j,k)); };
-    auto txz = [&](int i, int j, int k) { return !isInSystem(txz_idx(i,j,k)) ? 0 : x(txz_idx(i,j,k)); };
-    auto tyz = [&](int i, int j, int k) { return !isInSystem(tyz_idx(i,j,k)) ? 0 : x(tyz_idx(i,j,k)); };
+    auto txy = [&](int i, int j, int k) {
+        return isInSystem(txy_idx(i,j,k)) ? x(txy_idx(i,j,k)) : 0;
+    };
+    auto txz = [&](int i, int j, int k) {
+        return isInSystem(txz_idx(i,j,k)) ? x(txz_idx(i,j,k)) : 0;
+    };
+    auto tyz = [&](int i, int j, int k) {
+        return isInSystem(tyz_idx(i,j,k)) ? x(tyz_idx(i,j,k)) : 0;
+    };
 
     // cell centered quantities
-    auto txx = [&](int i, int j, int k) { return !isInSystem(txx_idx(i,j,k)) ? 0 : x(txx_idx(i,j,k)); };
-    auto tyy = [&](int i, int j, int k) { return !isInSystem(tyy_idx(i,j,k)) ? 0 : x(tyy_idx(i,j,k)); };
-    auto p   = [&](int i, int j, int k) { return !isInSystem(p_idx(i,j,k)  ) ? 0 : x(p_idx(i,j,k)); };
+    auto txx = [&](int i, int j, int k) {
+        return isInSystem(txx_idx(i,j,k)) ? x(txx_idx(i,j,k)) : 0;
+    };
+    auto tyy = [&](int i, int j, int k) {
+        return isInSystem(tyy_idx(i,j,k)) ? x(tyy_idx(i,j,k)) : 0;
+    };
+    auto p   = [&](int i, int j, int k) {
+        return isInSystem(p_idx(i,j,k))    ? x(p_idx(i,j,k))   : 0;
+    };
 
     if ( axis == 0 ) {
         UT_VoxelProbeAverage<float,-1,0,0> rhox;
         rhox.setArray(&parms.density);
-        UT_VoxelArrayIteratorF vit(&u);
-        vit.splitByTile(info);
+        UT_VoxelArrayIteratorF vit;
+        vit.setArray(vel.getField(axis)->fieldNC());
+        vit.setCompressOnExit(true);
+        //vit.splitByTile(info);
+        vit.setPartialRange(info.job(), info.numJobs());
 
-        for ( vit.rewind(); !vit.atEnd(); vit.advance() ) {
-            int i = vit.x(), j = vit.y(), k = vit.z();
-            int idx = myUIndex(i,j,k);
-            if (isCollision(idx)) {
-                vit.setValue(parms.u_solid.getValue(i,j,k));
-                if (valid) {
-                    valid->getField(axis)->fieldNC()->setValue(i,j,k,1);
-                }
-            } else if (isInSystem(idx)) {
-                if (valid) {
-                    valid->getField(axis)->fieldNC()->setValue(i,j,k,1);
-                    auto gfp = ghostFluidSurfaceTensionPressure<0>(i,j,k, parms.u_vol_liquid(i,j,k), parms.surfpres);
-                    rhox.setIndex(vit);
-                    auto rho = SYSclamp(rhox.getValue(), parms.minrho, parms.maxrho);
-                    auto factor = dt / (dx * rho * parms.u_vol_liquid(i,j,k));
-                    // pressure
-                    vit.setValue(u(i,j,k) + factor * (parms.c_vol_liquid.getValue(i-1,j,k)*p(i-1,j,k) - parms.c_vol_liquid.getValue(i,j,k)*p(i,j,k)
-                        // stress
-                        + ((parms.c_vol_liquid.getValue(i,j,k)    *txx(i,j,k)   - parms.c_vol_liquid.getValue(i-1,j,k) *txx(i-1,j,k))
-                        +  (parms.ez_vol_liquid.getValue(i,j+1,k) *txy(i,j+1,k) - parms.ez_vol_liquid.getValue(i,j,k)  *txy(i,j,k))
-                        +  (parms.ey_vol_liquid.getValue(i,j,k+1) *txz(i,j,k+1) - parms.ey_vol_liquid.getValue(i,j,k)  *txz(i,j,k))))
-                        - factor * gfp
-                        );
-                }
-            } else {
-                vit.setValue(0);
-            }
-        }
+        cxx_rust_interface( x,
+                            vit,
+                            valid,
+                            parms.density,
+                            parms.u_solid,
+                            parms.surfpres,
+                            parms.c_vol_liquid,
+                            parms.u_vol_liquid,
+                            parms.ez_vol_liquid,
+                            parms.ey_vol_liquid,
+                            axis,
+                            boss,
+                            info,
+                            ni,
+                            nj,
+                            nk,
+                            dt,
+                            dx,
+                            parms.minrho,
+                            parms.maxrho,
+                            myNumPressureVars,
+                            myUIndex,
+                            myVIndex,
+                            myWIndex,
+                            myCentralIndex,
+                            myTxyIndex,
+                            myTxzIndex,
+                            myTyzIndex,
+                            myCollisionIndex
+                            );
     } else if ( axis == 1 ) {
         std::cerr << " Sampling Axis is 1! " << std::endl;
         UT_VoxelProbeAverage<float,0,-1,0> rhoy;

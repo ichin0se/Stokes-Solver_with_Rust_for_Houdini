@@ -380,7 +380,7 @@ bool SIM_Stokes::solveGasSubclass(SIM_Engine& engine, SIM_Object* obj, SIM_Time 
         result = solver.solve(*surffield, sweights, cweights, *viscfield, *densfield, colvel, *surfpres, valid, *velocity);
     }else{
         assert( float_precision == FLOAT64 ); // only one option left
-        sim_stokesSolver<fpreal64> solver(*this, obj, nx, ny, nz, dx, timestep);
+        sim_stokesSolver<fpreal32> solver(*this, obj, nx, ny, nz, dx, timestep);
         solver.classifyAndBuildIndices(sweights, cweights);
         result = solver.solve(*surffield, sweights, cweights, *viscfield, *densfield, colvel, *surfpres, valid, *velocity);
     }

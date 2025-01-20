@@ -508,7 +508,7 @@ sim_stokesSolver<T>::buildViscosityMatrix(
     if ( visc > 0 )
     {
       if ( reduced_stress_tensor() )
-      {
+      {bool
         T diag, offdiag;
         if ( INVERSE )
         {
