@@ -303,7 +303,7 @@ namespace Stokes{
 
 
 
-        // date member
+        private:// date member
             int                 ni, nj, nk;
             float               dx, dt;
             int                 myNumPressureVars;
@@ -675,15 +675,45 @@ template<typename T> void sim_stokesSolver<T>::updateVelocitiesPartial( const Ve
         return isInSystem(p_idx(i,j,k))    ? x(p_idx(i,j,k))   : 0;
     };
 
-    if ( axis == 0 ) {
+    if ( axis == 0) {
         UT_VoxelProbeAverage<float,-1,0,0> rhox;
         rhox.setArray(&parms.density);
-        UT_VoxelArrayIteratorF vit;
-        vit.setArray(vel.getField(axis)->fieldNC());
-        vit.setCompressOnExit(true);
-        //vit.splitByTile(info);
-        vit.setPartialRange(info.job(), info.numJobs());
+        //UT_VoxelArrayIteratorF vit;
+        //vit.setArray(vel.getField(axis)->fieldNC());
+        //vit.setCompressOnExit(true);
+        //vit.setPartialRange(info.job(), info.numJobs());
+        UT_VoxelArrayIteratorF vit(&u);
+        vit.splitByTile(info);
+        /*
+        std::cerr << " Minrho: " << parms.minrho << std::endl;
+        std::cerr << " Maxrho: " << parms.maxrho << std::endl;
+        std::cerr << " Axis: " << axis << std::endl;
+        std::cerr << " NI: " << ni << std::endl;
+        std::cerr << " NJ: " << nj << std::endl;
+        std::cerr << " NK: " << nk << std::endl;
+        std::cerr << " DT: " << dt << std::endl;
+        std::cerr << " DX: " << dx << std::endl;
+        std::cerr << " MyNumPressureVars: " << myNumPressureVars << std::endl;
+        std::cerr << " MyCollisionIndex: " << myCollisionIndex << std::endl;
+        for ( vit.rewind(); !vit.atEnd(); vit.advance() ) {
+            int i = vit.x(), j = vit.y(), k = vit.z();
+            std::cerr << " Density: " << parms.density.getValue(i, j, k) << std::endl;
+            std::cerr << " U_solid: " << parms.u_solid.getValue(i, j, k) << std::endl;
+            std::cerr << " Surfpres: " << parms.surfpres.getValue(i, j, k) << std::endl;
+            std::cerr << " C_vol_liquid: " << parms.c_vol_liquid.getValue(i, j, k) << std::endl;
+            std::cerr << " U_vol_liquid: " << parms.u_vol_liquid.getValue(i, j, k) << std::endl;
+            std::cerr << " Ez_vol_liquid: " << parms.ez_vol_liquid.getValue(i, j, k) << std::endl;
+            std::cerr << "Ey_vol_liquid: " << parms.ey_vol_liquid.getValue(i, j, k) << std::endl;
 
+            std::cerr << "MyUIndex: " << myUIndex(i, j, k) << std::endl;
+            std::cerr << "MyCentralIndex: " << myCentralIndex(i, j, k) << std::endl;
+            std::cerr << "MyTxyIndex: " << myTxyIndex(i, j, k) << std::endl;
+            std::cerr << "MyTxzIndex: " << myTxzIndex(i, j, k) << std::endl;
+            std::cerr << "MyTyzIndex: " << myTyzIndex(i, j, k) << std::endl;
+
+
+        }
+         */
         cxx_rust_interface( x,
                             vit,
                             valid,
@@ -701,23 +731,63 @@ template<typename T> void sim_stokesSolver<T>::updateVelocitiesPartial( const Ve
                             nj,
                             nk,
                             dt,
+
                             dx,
                             parms.minrho,
                             parms.maxrho,
                             myNumPressureVars,
                             myUIndex,
-                            myVIndex,
-                            myWIndex,
                             myCentralIndex,
                             myTxyIndex,
                             myTxzIndex,
                             myTyzIndex,
                             myCollisionIndex
                             );
+
+/*
+for ( vit.rewind(); !vit.atEnd(); vit.advance() )
+{
+  int i = vit.x(), j = vit.y(), k = vit.z();
+  int idx = myUIndex(i,j,k);
+  if (isCollision(idx))
+  {
+    vit.setValue(parms.u_solid.getValue(i,j,k));
+    if (valid)
+      valid->getField(axis)->fieldNC()->setValue(i,j,k,1);
+  }
+  else if (isInSystem(idx))
+  {
+    if (valid)
+      valid->getField(axis)->fieldNC()->setValue(i,j,k,1);
+    auto gfp = ghostFluidSurfaceTensionPressure<0>(i,j,k, parms.u_vol_liquid(i,j,k), parms.surfpres);
+    rhox.setIndex(vit);
+    auto rho = SYSclamp(rhox.getValue(), parms.minrho, parms.maxrho);
+    auto factor = dt / (dx * rho * parms.u_vol_liquid(i,j,k));
+    std::cerr << " u_vol_liquid: " << parms.u_vol_liquid(i,j,k) << std::endl;
+    std::cerr << " myuindex: " << myUIndex(i,j,k) << std::endl;
+    std::cerr << " mycentralindex: " << myCentralIndex(i,j,k) << std::endl;
+    // pressure
+    vit.setValue(u(i,j,k) + factor * (parms.c_vol_liquid.getValue(i-1,j,k)*p(i-1,j,k) - parms.c_vol_liquid.getValue(i,j,k)*p(i,j,k)
+          // stress
+          + ((parms.c_vol_liquid.getValue(i,j,k)    *txx(i,j,k)   - parms.c_vol_liquid.getValue(i-1,j,k) *txx(i-1,j,k))
+          +  (parms.ez_vol_liquid.getValue(i,j+1,k) *txy(i,j+1,k) - parms.ez_vol_liquid.getValue(i,j,k)  *txy(i,j,k))
+          +  (parms.ey_vol_liquid.getValue(i,j,k+1) *txz(i,j,k+1) - parms.ey_vol_liquid.getValue(i,j,k)  *txz(i,j,k))))
+        - factor * gfp
+        );
+
+  } else
+    vit.setValue(0);
+
+}
+*/
     } else if ( axis == 1 ) {
-        std::cerr << " Sampling Axis is 1! " << std::endl;
+        //std::cerr << " Sampling Axis is 1! " << std::endl;
         UT_VoxelProbeAverage<float,0,-1,0> rhoy;
         rhoy.setArray(&parms.density);
+        //UT_VoxelArrayIteratorF vit;
+        //vit.setArray(vel.getField(axis)->fieldNC());
+        //vit.setCompressOnExit(true);
+        //vit.setPartialRange(info.job(), info.numJobs());
         UT_VoxelArrayIteratorF vit(&u);
         vit.splitByTile(info);
 
@@ -732,9 +802,11 @@ template<typename T> void sim_stokesSolver<T>::updateVelocitiesPartial( const Ve
                 if (valid) {
                 valid->getField(axis)->fieldNC()->setValue(i,j,k,1);
                 auto gfp = ghostFluidSurfaceTensionPressure<1>(i,j,k, parms.v_vol_liquid(i,j,k), parms.surfpres);
+
                 rhoy.setIndex(vit);
                 auto rho = SYSclamp(rhoy.getValue(), parms.minrho, parms.maxrho);
                 auto factor = dt / (dx * rho * parms.v_vol_liquid(i,j,k));
+
                 //pressure
                 vit.setValue(u(i,j,k) + factor * (parms.c_vol_liquid.getValue(i,j-1,k)*p(i,j-1,k) - parms.c_vol_liquid.getValue(i,j,k)*p(i,j,k)
                     //stress
@@ -749,9 +821,13 @@ template<typename T> void sim_stokesSolver<T>::updateVelocitiesPartial( const Ve
             }
         }
     } else if ( axis == 2 ) {
-        std::cerr << " Sampling Axis is 2! " << std::endl;
+        //std::cerr << " Sampling Axis is 2! " << std::endl;
         UT_VoxelProbeAverage<float,0,0,-1> rhoz;
         rhoz.setArray(&parms.density);
+        //UT_VoxelArrayIteratorF vit;
+        //vit.setArray(vel.getField(axis)->fieldNC());
+        //vit.setCompressOnExit(true);
+        //vit.setPartialRange(info.job(), info.numJobs());
         UT_VoxelArrayIteratorF vit(&u);
         vit.splitByTile(info);
 
@@ -768,8 +844,10 @@ template<typename T> void sim_stokesSolver<T>::updateVelocitiesPartial( const Ve
                 valid->getField(axis)->fieldNC()->setValue(i,j,k,1);
 
                 auto gfp = ghostFluidSurfaceTensionPressure<2>(i,j,k, parms.w_vol_liquid(i,j,k), parms.surfpres);
+
                 rhoz.setIndex(vit);
                 auto rho = SYSclamp(rhoz.getValue(), parms.minrho, parms.maxrho);
+                //std::cerr << " Correct rho: " << rho << std::endl;
                 auto factor =  dt / (dx * rho * parms.w_vol_liquid(i,j,k));
                 //pressure
                 vit.setValue(u(i,j,k) + factor * (parms.c_vol_liquid.getValue(i,j,k-1)*p(i,j,k-1) - parms.c_vol_liquid.getValue(i,j,k)*p(i,j,k)
@@ -780,6 +858,7 @@ template<typename T> void sim_stokesSolver<T>::updateVelocitiesPartial( const Ve
                     -  (parms.c_vol_liquid.getValue(i,j,k)   *tyy(i,j,k)   - parms.c_vol_liquid.getValue(i,j,k-1) *tyy(i,j,k-1))))
                     - factor * gfp
                     );
+                   // std::cerr << " Correct u: " << vit.getValue() << std::endl;
                 }
             } else {
                 vit.setValue(0);
@@ -789,6 +868,7 @@ template<typename T> void sim_stokesSolver<T>::updateVelocitiesPartial( const Ve
         std::cerr << " Sampling Axis is Unknown Dimension(3)! " << std::endl;
         assert(0); // uknown dimension
     }
+
 }
 
 
