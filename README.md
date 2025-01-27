@@ -43,7 +43,6 @@ Implementation by rust of the Stokes variational micro solver plug-in DOP for Ho
     ├── lib.rs
     ├── SIM_Stokes.cpp
     ├── SIM_Stokes.hpp
-    ├── SIM_Stokes.o
     ├── SolverCore.cpp
     └── util
         └── eigen.h
